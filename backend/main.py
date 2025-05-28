@@ -15,7 +15,7 @@ app = FastAPI(title="Emlak API")
 # CORS ayarları
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tüm originlere izin ver (production'da spesifik domain'ler belirtilmeli)
+    allow_origins=["https://real-estate-wp-gpt-bot-frontend.onrender.com"],  # Sadece frontend Render URL'sine izin ver
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
