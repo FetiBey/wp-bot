@@ -1,6 +1,5 @@
 import os
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from dotenv import load_dotenv
@@ -11,18 +10,8 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 def get_drive_service():
-    creds = None
     creds_path = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE")
-
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-        creds = flow.run_local_server(port=0)
-
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-
+    creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
 
 def get_or_create_folder(service, folder_name, parent_id=None):
