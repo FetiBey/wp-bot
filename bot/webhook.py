@@ -308,7 +308,7 @@ async def receive_message(request: Request):
                                 f.write(response.content)
                             # Drive'a yükle
                             service = get_drive_service()
-                            file_link = upload_file_to_drive(service, drive_folder_id, temp_filename)
+                            file_link = upload_file_to_drive(temp_filename, temp_filename, drive_folder_id)
                             # Veritabanında linki güncelle
                             photo_links = session.photo_links or []
                             photo_links.append(file_link)
