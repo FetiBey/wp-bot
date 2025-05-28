@@ -35,7 +35,8 @@ function App() {
 
   const fetchIlanlar = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/ilan');
+      const apiUrl = process.env.REACT_APP_API_URL || "http://localhost:8000";
+      const response = await axios.get(`${apiUrl}/ilan`);
       setIlanlar(response.data);
       setFilteredIlanlar(response.data);
       setLoading(false);
