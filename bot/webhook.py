@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 from bot.gpt_parser import parse_message_to_json
 from drive_service.uploader import upload_multiple_photos, upload_file_to_drive, get_or_create_folder, get_drive_service, delete_folder, get_folder_info, delete_folder_by_id
 from backend.database import SessionLocal
-from backend.crud import create_emlak_ilan, get_ilanlar, delete_emlak_ilan
-from backend.schemas.ilan import IlanCreate
+from backend.crud import create_emlak_ilan, get_ilanlar, delete_emlak_ilan, create_photo_upload_session, get_photo_upload_session, update_photo_upload_session, delete_photo_upload_session
+from backend.schemas.ilan import IlanCreate, PhotoUploadSessionCreate
 
 load_dotenv()
 
@@ -262,7 +262,7 @@ async def receive_message(request: Request):
                     "temp_photos": []
                 }
                 print(f"Görsel sayısı kaydedildi: {photo_count}")
-                resp.message(f"Lütfen {photo_count} adet görseli tek seferde seçip gönderiniz.")
+                resp.message(f"Lütfen {photo_count} adet görseli gönderiniz. Her bir görseli ayrı ayrı gönderebilirsiniz.")
                 response = Response(content=str(resp), media_type="application/xml")
                 print(f"Gönderilen yanıt: {str(resp)}")
                 return response
@@ -274,12 +274,28 @@ async def receive_message(request: Request):
                 return response
 
         elif current_state.get("state") == "waiting_for_photos":
+            db = SessionLocal()
+            session = get_photo_upload_session(db, from_number)
+            if not session:
+                # İlk görsel geldiğinde session oluştur
+                session_data = PhotoUploadSessionCreate(
+                    user_id=from_number,
+                    expected_photos=current_state["expected_photos"],
+                    received_photos=0,
+                    drive_folder_id=None,
+                    photo_links=[],
+                    state="waiting_for_photos"
+                )
+                session = create_photo_upload_session(db, session_data)
             if num_media > 0:
                 print(f"\nYeni görseller alındı: {num_media} adet")
-                # Her ilana özel benzersiz klasör oluştur
                 import time
-                photo_folder = f"temp_whatsapp/{from_number.replace(':', '_')}_{int(time.time())}"
-                os.makedirs(photo_folder, exist_ok=True)
+                if not session.drive_folder_id:
+                    service = get_drive_service()
+                    drive_folder_id = create_ilan_folder(service, current_state["details"])
+                    update_photo_upload_session(db, from_number, drive_folder_id=drive_folder_id)
+                else:
+                    drive_folder_id = session.drive_folder_id
                 for i in range(num_media):
                     media_url = form_data.get(f"MediaUrl{i}")
                     media_type = form_data.get(f"MediaContentType{i}")
@@ -287,51 +303,44 @@ async def receive_message(request: Request):
                     try:
                         response = requests.get(media_url, auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
                         if response.status_code == 200:
-                            temp_filename = os.path.join(photo_folder, f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}{ext}")
+                            temp_filename = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}{ext}"
                             with open(temp_filename, "wb") as f:
                                 f.write(response.content)
-                            current_state["temp_photos"].append(temp_filename)
-                            print(f"Fotoğraf indirildi: {temp_filename}")
+                            # Drive'a yükle
+                            service = get_drive_service()
+                            file_link = upload_file_to_drive(service, drive_folder_id, temp_filename)
+                            # Veritabanında linki güncelle
+                            photo_links = session.photo_links or []
+                            photo_links.append(file_link)
+                            update_photo_upload_session(db, from_number, received_photos=session.received_photos+1, photo_links=photo_links)
+                            print(f"Fotoğraf yüklendi: {file_link}")
+                            os.remove(temp_filename)
                         else:
                             print(f"Fotoğraf indirme hatası: {response.status_code}")
                             print(f"Hata detayı: {response.text}")
                     except Exception as e:
                         print(f"Fotoğraf indirme hatası: {str(e)}")
                         print(f"Hata detayı: {type(e).__name__}")
-                current_state["received_photos"] += num_media
-                remaining = current_state["expected_photos"] - current_state["received_photos"]
-                print(f"Toplam alınan: {current_state['received_photos']} / Beklenen: {current_state['expected_photos']}")
-                if current_state["received_photos"] >= current_state["expected_photos"]:
-                    try:
-                        service = get_drive_service()
-                        drive_folder_id = create_ilan_folder(service, current_state["details"])
-                        # Sadece bu ilana özel klasördeki fotoğrafları yükle
-                        photo_links = upload_multiple_photos(photo_folder, drive_folder_id)
-                        if not photo_links:
-                            raise Exception("Fotoğraflar Drive'a yüklenemedi")
-                        if process_ilan(from_number, current_state["details"], drive_folder_id):
-                            # Geçici fotoğraf klasörünü sil
-                            try:
-                                shutil.rmtree(photo_folder)
-                            except Exception as e:
-                                print(f"Geçici klasör silme hatası: {str(e)}")
-                                print(f"Hata detayı: {type(e).__name__}")
-                            user_states[from_number] = {}
-                            resp.message("İlanınız başarıyla kaydedildi!")
-                        else:
-                            resp.message("İlan kaydedilirken bir hata oluştu. Lütfen tekrar deneyiniz.")
-                    except Exception as e:
-                        print(f"İlan işleme hatası: {str(e)}")
-                        print(f"Hata detayı: {type(e).__name__}")
-                        resp.message("İlan işlenirken bir hata oluştu. Lütfen tekrar deneyiniz.")
-                        response = Response(content=str(resp), media_type="application/xml")
-                        return response
+                session = get_photo_upload_session(db, from_number)
+                remaining = session.expected_photos - session.received_photos
+                print(f"Toplam alınan: {session.received_photos} / Beklenen: {session.expected_photos}")
+                if session.received_photos >= session.expected_photos:
+                    # İlanı tamamla
+                    if process_ilan(from_number, current_state["details"], drive_folder_id):
+                        delete_photo_upload_session(db, from_number)
+                        user_states[from_number] = {}
+                        resp.message("İlanınız başarıyla kaydedildi!")
+                    else:
+                        resp.message("İlan kaydedilirken bir hata oluştu. Lütfen tekrar deneyiniz.")
                 else:
-                    send_whatsapp_message(from_number, f"{remaining} görsel daha bekleniyor.")
+                    send_whatsapp_message(from_number, f"{remaining} görsel daha göndermeniz gerekiyor. Lütfen bir sonraki görseli gönderin.")
+                    db.close()
                     return Response(content="", media_type="application/xml")
+                db.close()
             else:
                 print("Görsel beklenirken medya yok")
                 send_whatsapp_message(from_number, "Lütfen görselleri gönderin.")
+                db.close()
                 return Response(content="", media_type="application/xml")
 
         elif current_state.get("state") == "waiting_for_search_keyword" and current_state.get("action") == "delete":

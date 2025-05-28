@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 from . import models, schemas
+from .models import Ilan, PhotoUploadSession
+from .schemas.ilan import IlanCreate, PhotoUploadSessionCreate
 
 def get_ilanlar(db: Session, skip: int = 0, limit: int = 100):
     """Tüm ilanları getir"""
@@ -41,3 +43,29 @@ def delete_emlak_ilan(db: Session, folder_name: str):
     except Exception as e:
         db.rollback()
         return False, f"İlan silinirken hata oluştu: {str(e)}" 
+
+def create_photo_upload_session(db: Session, session_data: PhotoUploadSessionCreate):
+    db_session = PhotoUploadSession(**session_data.dict())
+    db.add(db_session)
+    db.commit()
+    db.refresh(db_session)
+    return db_session
+
+def get_photo_upload_session(db: Session, user_id: str):
+    return db.query(PhotoUploadSession).filter(PhotoUploadSession.user_id == user_id).first()
+
+def update_photo_upload_session(db: Session, user_id: str, **kwargs):
+    session = db.query(PhotoUploadSession).filter(PhotoUploadSession.user_id == user_id).first()
+    if session:
+        for key, value in kwargs.items():
+            setattr(session, key, value)
+        db.commit()
+        db.refresh(session)
+    return session
+
+def delete_photo_upload_session(db: Session, user_id: str):
+    session = db.query(PhotoUploadSession).filter(PhotoUploadSession.user_id == user_id).first()
+    if session:
+        db.delete(session)
+        db.commit()
+    return session 

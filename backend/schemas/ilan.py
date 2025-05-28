@@ -41,3 +41,19 @@ class IlanResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class PhotoUploadSessionBase(BaseModel):
+    user_id: str
+    expected_photos: int
+    received_photos: int = 0
+    drive_folder_id: Optional[str] = None
+    photo_links: List[str] = []
+    state: str = "waiting_for_photos"
+
+class PhotoUploadSessionCreate(PhotoUploadSessionBase):
+    pass
+
+class PhotoUploadSession(PhotoUploadSessionBase):
+    id: int
+    class Config:
+        orm_mode = True
