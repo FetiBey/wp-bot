@@ -311,11 +311,11 @@ async def receive_message(request: Request):
                             raise Exception("Fotoğraflar Drive'a yüklenemedi")
                         if process_ilan(from_number, current_state["details"], drive_folder_id):
                             # Geçici fotoğraf klasörünü sil
-                                try:
+                            try:
                                 shutil.rmtree(photo_folder)
-                                except Exception as e:
+                            except Exception as e:
                                 print(f"Geçici klasör silme hatası: {str(e)}")
-                                    print(f"Hata detayı: {type(e).__name__}")
+                                print(f"Hata detayı: {type(e).__name__}")
                             user_states[from_number] = {}
                             resp.message("İlanınız başarıyla kaydedildi!")
                         else:
