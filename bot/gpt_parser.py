@@ -3,10 +3,11 @@
 import openai
 import os
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Örnek prompt fonksiyonu
 def parse_message_to_json(message: str) -> dict:
@@ -39,7 +40,7 @@ Notlar:
 - Eğer mesajda birden fazla satır varsa, genellikle ilk satır mahalle bilgisidir. Başındaki emoji veya işareti temizle.
 """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
             {"role": "user", "content": prompt}
@@ -47,11 +48,10 @@ Notlar:
         temperature=0.2
     )
 
-    json_str = response['choices'][0]['message']['content']
+    json_str = response.choices[0].message.content
 
     # JSON metnini Python dict'e dönüştür
     try:
-        import json
         result = json.loads(json_str)
         # Eğer mahalle (konum) boşsa, ilk satırı kullan
         if not result.get('konum'):
