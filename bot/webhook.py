@@ -188,20 +188,35 @@ async def receive_message(request: Request):
         # Kullanıcının mevcut durumunu kontrol et
         current_state = user_states.get(from_number, {})
 
-        if message_body and message_body.strip().lower() == "/ekle":
-            # Yeni ilan ekleme başlat
-            user_states[from_number] = {
-                "state": "waiting_for_details",
-                "expected_photos": 0,
-                "received_photos": 0,
-                "details": "",
-                "photos": [],
-                "temp_photos": []
-            }
-            print(f"Yeni ilan başlatıldı: {from_number}")
-            resp.message("Lütfen ilan detaylarını giriniz.")
+        if message_body and message_body.strip().lower() == "/tamamla":
+            if current_state.get("state") == "waiting_for_photos":
+                # İlanı tamamla
+                db = SessionLocal()
+                try:
+                    session = get_photo_upload_session(db, from_number)
+                    if not session:
+                        resp.message("Önce ilan detaylarını girmeniz gerekiyor.")
+                        response = Response(content=str(resp), media_type="application/xml")
+                        return response
+
+                    if session.received_photos == 0:
+                        resp.message("En az bir fotoğraf eklemeniz gerekiyor.")
+                        response = Response(content=str(resp), media_type="application/xml")
+                        return response
+
+                    if process_ilan(from_number, current_state["details"], session.drive_folder_id):
+                        # Drive klasör linkini oluştur
+                        drive_link = f"https://drive.google.com/drive/folders/{session.drive_folder_id}"
+                        delete_photo_upload_session(db, from_number)
+                        user_states[from_number] = {}
+                        resp.message(f"İlanınız başarıyla kaydedildi!\n\nDrive klasör linki: {drive_link}")
+                    else:
+                        resp.message("İlan kaydedilirken bir hata oluştu. Lütfen tekrar deneyiniz.")
+                finally:
+                    db.close()
+            else:
+                resp.message("Önce ilan detaylarını girmeniz gerekiyor.")
             response = Response(content=str(resp), media_type="application/xml")
-            print(f"Gönderilen yanıt: {str(resp)}")
             return response
 
         elif message_body and message_body.strip().lower() == "/sil":
@@ -214,8 +229,8 @@ async def receive_message(request: Request):
             response = Response(content=str(resp), media_type="application/xml")
             return response
 
-        elif current_state.get("state") == "waiting_for_details":
-            # İlan detaylarını analiz et
+        # Eğer kullanıcı herhangi bir durumda değilse ve mesaj gönderdiyse, ilan detaylarını analiz et
+        elif not current_state:
             try:
                 print(f"İlan detayları analiz ediliyor: {message_body}")
                 parsed_details = parse_message_to_json(message_body)
@@ -228,17 +243,15 @@ async def receive_message(request: Request):
                     print(f"Gönderilen yanıt: {str(resp)}")
                     return response
                 
-                # İlan detaylarını kaydet
+                # İlan detaylarını kaydet ve fotoğraf bekleme durumuna geç
                 user_states[from_number] = {
-                    "state": "waiting_for_photo_count",
+                    "state": "waiting_for_photos",
                     "details": parsed_details,
-                    "expected_photos": 0,
-                    "received_photos": 0,
                     "photos": [],
                     "temp_photos": []
                 }
                 print(f"İlan detayları kaydedildi: {json.dumps(parsed_details, indent=2)}")
-                resp.message("Kaç görsel ekleyeceksiniz?")
+                resp.message("İlan detayları kaydedildi. Şimdi fotoğrafları gönderebilirsiniz. İşlem bittiğinde /tamamla komutunu kullanın.")
                 response = Response(content=str(resp), media_type="application/xml")
                 print(f"Gönderilen yanıt: {str(resp)}")
                 return response
@@ -250,29 +263,6 @@ async def receive_message(request: Request):
                 print(f"Gönderilen yanıt: {str(resp)}")
                 return response
 
-        elif current_state.get("state") == "waiting_for_photo_count":
-            try:
-                photo_count = int(message_body)
-                user_states[from_number] = {
-                    "state": "waiting_for_photos",
-                    "expected_photos": photo_count,
-                    "received_photos": 0,
-                    "details": current_state["details"],
-                    "photos": [],
-                    "temp_photos": []
-                }
-                print(f"Görsel sayısı kaydedildi: {photo_count}")
-                resp.message(f"Lütfen {photo_count} adet görseli gönderiniz. Her bir görseli ayrı ayrı gönderebilirsiniz.")
-                response = Response(content=str(resp), media_type="application/xml")
-                print(f"Gönderilen yanıt: {str(resp)}")
-                return response
-            except ValueError:
-                print("Geçersiz görsel sayısı")
-                resp.message("Lütfen geçerli bir sayı giriniz.")
-                response = Response(content=str(resp), media_type="application/xml")
-                print(f"Gönderilen yanıt: {str(resp)}")
-                return response
-
         elif current_state.get("state") == "waiting_for_photos":
             db = SessionLocal()
             session = get_photo_upload_session(db, from_number)
@@ -280,13 +270,14 @@ async def receive_message(request: Request):
                 # İlk görsel geldiğinde session oluştur
                 session_data = PhotoUploadSessionCreate(
                     user_id=from_number,
-                    expected_photos=current_state["expected_photos"],
+                    expected_photos=999,  # Maksimum fotoğraf sayısı
                     received_photos=0,
                     drive_folder_id=None,
                     photo_links=[],
                     state="waiting_for_photos"
                 )
                 session = create_photo_upload_session(db, session_data)
+
             if num_media > 0:
                 print(f"\nYeni görseller alındı: {num_media} adet")
                 import time
@@ -296,6 +287,7 @@ async def receive_message(request: Request):
                     update_photo_upload_session(db, from_number, drive_folder_id=drive_folder_id)
                 else:
                     drive_folder_id = session.drive_folder_id
+
                 for i in range(num_media):
                     media_url = form_data.get(f"MediaUrl{i}")
                     media_type = form_data.get(f"MediaContentType{i}")
@@ -321,126 +313,19 @@ async def receive_message(request: Request):
                     except Exception as e:
                         print(f"Fotoğraf indirme hatası: {str(e)}")
                         print(f"Hata detayı: {type(e).__name__}")
+
                 session = get_photo_upload_session(db, from_number)
-                remaining = session.expected_photos - session.received_photos
-                print(f"Toplam alınan: {session.received_photos} / Beklenen: {session.expected_photos}")
-                if session.received_photos >= session.expected_photos:
-                    # İlanı tamamla
-                    if process_ilan(from_number, current_state["details"], drive_folder_id):
-                        delete_photo_upload_session(db, from_number)
-                        user_states[from_number] = {}
-                        resp.message("İlanınız başarıyla kaydedildi!")
-                    else:
-                        resp.message("İlan kaydedilirken bir hata oluştu. Lütfen tekrar deneyiniz.")
-                else:
-                    send_whatsapp_message(from_number, f"{remaining} görsel daha göndermeniz gerekiyor. Lütfen bir sonraki görseli gönderin.")
-                    db.close()
-                    return Response(content="", media_type="application/xml")
+                send_whatsapp_message(from_number, f"Fotoğraf başarıyla yüklendi. Toplam {session.received_photos} fotoğraf yüklendi. İşlem bittiğinde /tamamla komutunu kullanın.")
                 db.close()
+                return Response(content="", media_type="application/xml")
             else:
                 print("Görsel beklenirken medya yok")
-                send_whatsapp_message(from_number, "Lütfen görselleri gönderin.")
+                send_whatsapp_message(from_number, "Lütfen fotoğraf gönderin veya işlemi tamamlamak için /tamamla komutunu kullanın.")
                 db.close()
                 return Response(content="", media_type="application/xml")
 
-        elif current_state.get("state") == "waiting_for_search_keyword" and current_state.get("action") == "delete":
-            search_keyword = message_body.strip()
-            drive_service = get_drive_service()
-            success, folder_info = get_folder_info(drive_service, search_keyword)
-            if not success:
-                resp.message(f"Klasör bulunamadı. Lütfen anahtar kelimeyi kontrol ediniz.")
-                response = Response(content=str(resp), media_type="application/xml")
-                return response
-
-            # Klasörlerin tam yolunu bulmak için yardımcı fonksiyon
-            def get_folder_path(service, folder_id, name_cache=None):
-                if name_cache is None:
-                    name_cache = {}
-                try:
-                    folder = service.files().get(fileId=folder_id, fields="id, name, parents").execute()
-                    name = folder['name']
-                    parents = folder.get('parents', [])
-                    if not parents:
-                        return name
-                    parent_id = parents[0]
-                    if parent_id in name_cache:
-                        parent_name = name_cache[parent_id]
-                    else:
-                        parent = service.files().get(fileId=parent_id, fields="id, name, parents").execute()
-                        parent_name = parent['name']
-                        name_cache[parent_id] = parent_name
-                    return f"{get_folder_path(service, parent_id, name_cache)}/{name}"
-                except HttpError:
-                    return name
-
-            # Klasörleri numaralandırılmış liste olarak göster
-            folder_list = []
-            for idx, item in enumerate(folder_info, 1):
-                folder_path = get_folder_path(drive_service, item['id'])
-                folder_list.append(f"{idx}. {folder_path}")
-
-            folder_list_text = "\n".join(folder_list)
-            resp.message(f"Bulunan klasörler:\n{folder_list_text}\n\nLütfen silmek istediğiniz klasörün numarasını giriniz.")
-            
-            # Klasör bilgilerini state'e kaydet
-            user_states[from_number] = {
-                "state": "waiting_for_folder_number",
-                "action": "delete",
-                "folder_list": folder_info
-            }
-            response = Response(content=str(resp), media_type="application/xml")
-            return response
-
-        elif current_state.get("state") == "waiting_for_folder_number" and current_state.get("action") == "delete":
-            try:
-                folder_number = int(message_body.strip())
-                folder_list = current_state.get("folder_list", [])
-                
-                if folder_number < 1 or folder_number > len(folder_list):
-                    resp.message("Geçersiz numara. Lütfen listeden bir numara seçiniz.")
-                    response = Response(content=str(resp), media_type="application/xml")
-                    return response
-
-                selected_folder = folder_list[folder_number - 1]
-                folder_id = selected_folder['id']
-
-                drive_service = get_drive_service()
-                # Klasörü id ile sil
-                drive_success, drive_message = delete_folder_by_id(drive_service, folder_id)
-
-                # Veritabanından ilanı sil
-                db = SessionLocal()
-                try:
-                    # Klasör adını veritabanındaki başlık formatına çevir
-                    db_folder_name = selected_folder['name'].replace(" #SADEEVIM", "").strip()
-                    db_success, db_message = delete_emlak_ilan(db, db_folder_name)
-                finally:
-                    db.close()
-
-                # Sonucu kullanıcıya bildir
-                if drive_success and db_success:
-                    resp.message("İlan ve ilgili klasör başarıyla silindi.")
-                else:
-                    error_message = "İlan silinirken hatalar oluştu:\n"
-                    if not drive_success:
-                        error_message += f"Drive: {drive_message}\n"
-                    if not db_success:
-                        error_message += f"Veritabanı: {db_message}"
-                    resp.message(error_message)
-
-            except ValueError:
-                resp.message("Lütfen geçerli bir numara giriniz.")
-                response = Response(content=str(resp), media_type="application/xml")
-                return response
-
-            # Kullanıcı durumunu sıfırla
-            user_states[from_number] = {}
-
-            response = Response(content=str(resp), media_type="application/xml")
-            return response
-
         # Varsayılan yanıt
-        resp.message("Geçersiz komut. İlan eklemek için /ekle komutunu kullanın.")
+        resp.message("İlan eklemek için ilan detaylarını giriniz. İşlem bittiğinde /tamamla komutunu kullanın.")
         return Response(content=str(resp), media_type="application/xml")
 
     except Exception as e:
