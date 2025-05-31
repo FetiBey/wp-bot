@@ -373,52 +373,65 @@ async def receive_message(request: Request):
                 except HttpError:
                     return name
 
-            folder_list = "\n".join([
-                f"- {get_folder_path(drive_service, item['id'])} (id: {item['id']})" for item in folder_info
-            ])
-            resp.message(f"Bulunan klasörler:\n{folder_list}\n\nLütfen silmek istediğiniz klasörün tam adını ve id'sini giriniz.")
-            # Sonraki adımda id bekle
+            # Klasörleri numaralandırılmış liste olarak göster
+            folder_list = []
+            for idx, item in enumerate(folder_info, 1):
+                folder_path = get_folder_path(drive_service, item['id'])
+                folder_list.append(f"{idx}. {folder_path}")
+
+            folder_list_text = "\n".join(folder_list)
+            resp.message(f"Bulunan klasörler:\n{folder_list_text}\n\nLütfen silmek istediğiniz klasörün numarasını giriniz.")
+            
+            # Klasör bilgilerini state'e kaydet
             user_states[from_number] = {
-                "state": "waiting_for_folder_name",
-                "action": "delete"
+                "state": "waiting_for_folder_number",
+                "action": "delete",
+                "folder_list": folder_info
             }
             response = Response(content=str(resp), media_type="application/xml")
             return response
 
-        elif current_state.get("state") == "waiting_for_folder_name" and current_state.get("action") == "delete":
-            folder_info_text = message_body.strip()
-            # Klasör id'sini ayıkla
-            match = re.search(r'id: ([a-zA-Z0-9_-]+)', folder_info_text)
-            if not match:
-                resp.message("Klasör id'si bulunamadı. Lütfen mesajı aşağıdaki formatta girin:\n(id: xxxxxxxx)")
+        elif current_state.get("state") == "waiting_for_folder_number" and current_state.get("action") == "delete":
+            try:
+                folder_number = int(message_body.strip())
+                folder_list = current_state.get("folder_list", [])
+                
+                if folder_number < 1 or folder_number > len(folder_list):
+                    resp.message("Geçersiz numara. Lütfen listeden bir numara seçiniz.")
+                    response = Response(content=str(resp), media_type="application/xml")
+                    return response
+
+                selected_folder = folder_list[folder_number - 1]
+                folder_id = selected_folder['id']
+
+                drive_service = get_drive_service()
+                # Klasörü id ile sil
+                drive_success, drive_message = delete_folder_by_id(drive_service, folder_id)
+
+                # Veritabanından ilanı sil
+                db = SessionLocal()
+                try:
+                    # Klasör adını veritabanındaki başlık formatına çevir
+                    db_folder_name = selected_folder['name'].replace(" #SADEEVIM", "").strip()
+                    db_success, db_message = delete_emlak_ilan(db, db_folder_name)
+                finally:
+                    db.close()
+
+                # Sonucu kullanıcıya bildir
+                if drive_success and db_success:
+                    resp.message("İlan ve ilgili klasör başarıyla silindi.")
+                else:
+                    error_message = "İlan silinirken hatalar oluştu:\n"
+                    if not drive_success:
+                        error_message += f"Drive: {drive_message}\n"
+                    if not db_success:
+                        error_message += f"Veritabanı: {db_message}"
+                    resp.message(error_message)
+
+            except ValueError:
+                resp.message("Lütfen geçerli bir numara giriniz.")
                 response = Response(content=str(resp), media_type="application/xml")
                 return response
-            folder_id = match.group(1)
-
-            drive_service = get_drive_service()
-            # Klasörü id ile sil
-            drive_success, drive_message = delete_folder_by_id(drive_service, folder_id)
-
-            # Veritabanından ilanı sil (isimle devam edelim)
-            db = SessionLocal()
-            try:
-                # Klasör adını veritabanındaki başlık formatına çevir
-                # (Kullanıcıdan ad+id birlikte gelirse, ad kısmını ayıklayalım)
-                db_folder_name = folder_info_text.split(' (id:')[0].split('/')[-1].replace(" #SADEEVIM", "").strip()
-                db_success, db_message = delete_emlak_ilan(db, db_folder_name)
-            finally:
-                db.close()
-
-            # Sonucu kullanıcıya bildir
-            if drive_success and db_success:
-                resp.message("İlan ve ilgili klasör başarıyla silindi.")
-            else:
-                error_message = "İlan silinirken hatalar oluştu:\n"
-                if not drive_success:
-                    error_message += f"Drive: {drive_message}\n"
-                if not db_success:
-                    error_message += f"Veritabanı: {db_message}"
-                resp.message(error_message)
 
             # Kullanıcı durumunu sıfırla
             user_states[from_number] = {}
