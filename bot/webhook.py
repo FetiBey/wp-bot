@@ -229,6 +229,102 @@ async def receive_message(request: Request):
             response = Response(content=str(resp), media_type="application/xml")
             return response
 
+        elif current_state.get("state") == "waiting_for_search_keyword" and current_state.get("action") == "delete":
+            search_keyword = message_body.strip()
+            drive_service = get_drive_service()
+            success, folder_info = get_folder_info(drive_service, search_keyword)
+            if not success:
+                resp.message(f"Klasör bulunamadı. Lütfen anahtar kelimeyi kontrol ediniz.")
+                response = Response(content=str(resp), media_type="application/xml")
+                return response
+
+            # Klasörlerin tam yolunu bulmak için yardımcı fonksiyon
+            def get_folder_path(service, folder_id, name_cache=None):
+                if name_cache is None:
+                    name_cache = {}
+                try:
+                    folder = service.files().get(fileId=folder_id, fields="id, name, parents").execute()
+                    name = folder['name']
+                    parents = folder.get('parents', [])
+                    if not parents:
+                        return name
+                    parent_id = parents[0]
+                    if parent_id in name_cache:
+                        parent_name = name_cache[parent_id]
+                    else:
+                        parent = service.files().get(fileId=parent_id, fields="id, name, parents").execute()
+                        parent_name = parent['name']
+                        name_cache[parent_id] = parent_name
+                    return f"{get_folder_path(service, parent_id, name_cache)}/{name}"
+                except HttpError:
+                    return name
+
+            # Klasörleri numaralandırılmış liste olarak göster
+            folder_list = []
+            for idx, item in enumerate(folder_info, 1):
+                folder_path = get_folder_path(drive_service, item['id'])
+                folder_list.append(f"{idx}. {folder_path}")
+
+            folder_list_text = "\n".join(folder_list)
+            resp.message(f"Bulunan klasörler:\n{folder_list_text}\n\nLütfen silmek istediğiniz klasörün numarasını giriniz.")
+            
+            # Klasör bilgilerini state'e kaydet
+            user_states[from_number] = {
+                "state": "waiting_for_folder_number",
+                "action": "delete",
+                "folder_list": folder_info
+            }
+            response = Response(content=str(resp), media_type="application/xml")
+            return response
+
+        elif current_state.get("state") == "waiting_for_folder_number" and current_state.get("action") == "delete":
+            try:
+                folder_number = int(message_body.strip())
+                folder_list = current_state.get("folder_list", [])
+                
+                if folder_number < 1 or folder_number > len(folder_list):
+                    resp.message("Geçersiz numara. Lütfen listeden bir numara seçiniz.")
+                    response = Response(content=str(resp), media_type="application/xml")
+                    return response
+
+                selected_folder = folder_list[folder_number - 1]
+                folder_id = selected_folder['id']
+
+                drive_service = get_drive_service()
+                # Klasörü id ile sil
+                drive_success, drive_message = delete_folder_by_id(drive_service, folder_id)
+
+                # Veritabanından ilanı sil
+                db = SessionLocal()
+                try:
+                    # Klasör adını veritabanındaki başlık formatına çevir
+                    db_folder_name = selected_folder['name'].replace(" #SADEEVIM", "").strip()
+                    db_success, db_message = delete_emlak_ilan(db, db_folder_name)
+                finally:
+                    db.close()
+
+                # Sonucu kullanıcıya bildir
+                if drive_success and db_success:
+                    resp.message("İlan ve ilgili klasör başarıyla silindi.")
+                else:
+                    error_message = "İlan silinirken hatalar oluştu:\n"
+                    if not drive_success:
+                        error_message += f"Drive: {drive_message}\n"
+                    if not db_success:
+                        error_message += f"Veritabanı: {db_message}"
+                    resp.message(error_message)
+
+            except ValueError:
+                resp.message("Lütfen geçerli bir numara giriniz.")
+                response = Response(content=str(resp), media_type="application/xml")
+                return response
+
+            # Kullanıcı durumunu sıfırla
+            user_states[from_number] = {}
+
+            response = Response(content=str(resp), media_type="application/xml")
+            return response
+
         # Eğer kullanıcı herhangi bir durumda değilse ve mesaj gönderdiyse, ilan detaylarını analiz et
         elif not current_state:
             try:
